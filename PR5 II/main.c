@@ -1,6 +1,14 @@
 #include <msp430.h>
 
 typedef enum {NORMAL, PENALTI, FALTA} tEstado;
+typedef enum {A_NORMAL, A_GOL, A_PENALTI, A_FALTA, A_J1J2, A_J2J1} tAnimacion;
+//bits 0 a 5 de la bateria. Registro LCDM14 y LCDM18. PATRONES CON BATERIA. 
+// A_NORMAL     111111
+// A_GOL        000000 -> 111111
+// A_PENALTI    010101 -> 101010
+// A_FALTA      110011 -> 001100
+// A_J1J2       100000 -> 010000 -> 001000 -> ...
+// A_J2J1       000001 -> 000010 -> 000100 -> ...
 
 const char MENSAJEINICIO[] = "COMIENZA EL PARTIDO: PULSAD LA TECLA P/ I PARA ALTERNAR ENTRE CENTESIMAS PARES/ IMPARES AL TIRAR UN PENALTI O CUALQUIER OTRA TECLA PARA VER EL MARCADOR\n";
 const char MENSAJEGOL[] = "GOL DEL JUGADOR ";
@@ -12,27 +20,23 @@ const char MENSAJEEMPATE[] = "\nFIN DEL PARTIDO: EMPATE";
 const unsigned char LCDNUM[10] = {0xFC, 0x60, 0xDB, 0xF3, 0x67, 0xB7, 0xBF, 0xE0, 0xFF, 0xE7};
 const unsigned int MAXTIME = 9000; // En centisegundos
 const int MAXGOLES = 5;
-const int TURNO = 5;
+const int ANIMACION = 6; //num de interrupciones
 
 char mensajeAMandar[200];
 volatile unsigned int contMensaje = 0;
 volatile unsigned int centiseg = 0;
-volatile unsigned int tiempoDeTiro = TURNO;
 volatile int goles1 = 0, goles2 = 0;
 volatile tEstado estadoActual = NORMAL;
+volatile tAnimacion animacionActual = A_NORMAL;
 volatile int par = 0;
-
-//para el tiempo de turno.
-volatile int j, r;
+int tiempoAnimacion = 6;
 
 void initPins(void);
 void initClock(void);
-void initTimers(void);
+void initTimer(void);
 void initLCD(void);
 void initUART(void);
 void display(void); 
-void verTiempoDeTiro(void);
-void quitarTiempoDeTiro(void);
 void accionJugador(int jugador, int rival);
 int partidoTerminado(void);
 void terminarPartido(void);
@@ -48,6 +52,15 @@ void enviarMensaje(const char* mensaje, int jugador);
 char nombreJugador(int jugador);
 void enviarCaracter(void);
 
+//funciones de animaciones.
+void interrupcionAnimacion(void);
+void avanzarAnimacion(void);
+void setAnimacion(tAnimacion animacion);
+void animacionOpuesta(void);
+void desplazarDer(void);
+void desplazarIzq(void);
+void movimientoIzqDer(int momento);
+
 int main(void) {
     WDTCTL = WDTPW | WDTHOLD; 
     PM5CTL0 &= ~LOCKLPM5;
@@ -59,6 +72,7 @@ int main(void) {
     initUART();
     display();
     enviarMensaje(MENSAJEINICIO, 0);
+    setAnimacion(A_NORMAL);
     _BIS_SR(LPM0_bits + GIE);
 }
 
@@ -74,10 +88,22 @@ __interrupt void BUTTONS(void) {
 }
 
 #pragma vector = TIMER0_A0_VECTOR
-__interrupt void TURNO(void) {
-    tiempoDeTiro--;
-    if(tiempoDeTiro > 0) verTiempoDeTiro();
-    else finDeTurno();
+__interrupt void ANIMATION_FAST(void) {
+    interrupcionAnimacion();
+}
+
+#pragma vector = TIMER0_A1_VECTOR
+__interrupt void ANIMATION_SLOW(void) {
+    if(TA0IV == 14) interrupcionAnimacion(); //overflow
+}
+
+void interrupcionAnimacion(void){
+    tiempoAnimacion--;
+    if(tiempoAnimacion > 0) avanzarAnimacion();
+    else {
+        tiempoAnimacion = ANIMACION;
+        setAnimacion(A_NORMAL);
+    }
 }
 
 #pragma vector = TIMER1_A0_VECTOR
@@ -158,22 +184,25 @@ void gol(int jugador) {
     if(jugador == BIT1) goles1++;
     else goles2++;
     enviarMensaje(MENSAJEGOL, jugador);
+    setAnimacion(A_GOL);
 }
 
 void penalti(int jugador) {
     estadoActual = PENALTI;
     enviarMensaje(MENSAJEPENALTI, jugador);
+    setAnimacion(A_PENALTI);
 }
 
 void falta(int jugador){
     estadoActual = FALTA;
     enviarMensaje(MENSAJEFALTA, jugador);
+    setAnimacion(A_FALTA);
 }
 
 void pasarTurno(int jugador, int rival){
     P1IE &= ~jugador;
     P1IE |= rival;
-
+    setAnimacion(jugador == BIT1 ? A_J1J2 : A_J2J1);
     // Apagamos el LED del jugador y encendemos el del rival
     if(jugador == BIT1){ 
         P1OUT &= ~BIT0;
@@ -185,9 +214,8 @@ void pasarTurno(int jugador, int rival){
     }
 }
 
-// LCD
+// LCD y animaciones
 void display(void){ 
-    //LCDCMEMCTL |= LCDCLRM;
     LCDM7 |= 0x04; // Activa los dos puntos del bloque A2
     LCDM20 |= 0x04; // Activa los dos puntos del bloque A4
 
@@ -203,22 +231,58 @@ void display(void){
     LCDM6 = LCDNUM[minutos % 10]; // Solo llega hasta 1
 }
 
-void verTiempoDeTiro(void){ 
-    //LCDCMEMCTL |= LCDCLRM;
-    LCDM20 ^= BIT2; //simbolo de crono
-    LCDM10 = LCDNUM[tiempoDeTiro];
+void avanzarAnimacion(void){
+    switch(animacionActual){ 
+        case A_NORMAL: break; //no definimos cambios.
+        case A_GOL: 
+        case A_PENALTI:  
+        case A_FALTA: animacionOpuesta();  break;
+        case A_J1J2: desplazarDer(); break;
+        case A_J2J1: desplazarIzq(); break;
+    }
 }
 
-void finDeTurno(void){
-
+void animacionOpuesta(void){
+    LCDM14 ^= (BIT5 | BIT6 | BIT7);
+    LCDM18 ^= (BIT5 | BIT6 | BIT7);
 }
 
-void quitarTiempoDeTiro(void){
-    tiempoDeTiro = TURNO;
-    LCDM20 &= ~BIT2;
-    LCDM10 = 0;
-    TA0CCTL0 &= ~CCIE; //deshabilitamos interrupciones. 
+void desplazarDer(void){
+    movimientoIzqDer(tiempoAnimacion);
 }
+
+void desplazarIzq(void){
+    movimientoIzqDer(ANIMACION - tiempoAnimacion + 1);
+}
+
+void movimientoIzqDer(int momento){
+    LCDM14 = LCDM18 = 0;
+    switch(momento){
+        case 6: LCDM18 = BIT5; break;
+        case 5: LCDM14 = BIT5; break;
+        case 4: LCDM18 = BIT6; break;
+        case 3: LCDM14 = BIT6; break;
+        case 2: LCDM18 = BIT7; break;
+        case 1: LCDM14 = BIT7; break;
+    }
+}
+
+void setAnimacion(tAnimacion animacion){
+    if(animacionActual == A_NORMAL || animacion == A_NORMAL) {
+        LCDM14 = LCDM18 = 0;
+        tiempoAnimacion = ANIMACION;
+        animacionActual = animacion;
+        switch(animacion){ 
+        case A_NORMAL:
+        case A_GOL: LCDM18 = LCDM14 = (BIT5 | BIT6 | BIT7); break;
+        case A_PENALTI:  LCDM14 = (BIT5 | BIT6 | BIT7); break;
+        case A_FALTA: LCDM18 = LCDM14 = (BIT5 | BIT7);  break;
+        case A_J1J2: LCDM18 = BIT5; break;
+        case A_J2J1: LCDM14 = BIT7; break;
+        }
+    }
+}
+
 
 // UART
 void recibirCaracter(void) {
@@ -325,14 +389,15 @@ void initClock(void) {
     CSCTL0_H = 0; // Lock CS registers
 }
 
-void initTimers(void) { 
+void initTimer(void) { 
     TA1CTL = TASSEL__ACLK | TACLR | MC_1;
     TA1CCR0 = 327;
     TA1CCTL0 &= ~CCIE;
 
-    TA0CTL = TASSEL__ACLK | TACLR | MC_1;
-    TA0CCR0 = 32700; //segundos
-    TA0CCTL0 &= ~CCIE;
+    TA0CTL = TASSEL__SMCLK | TACLR | MC_2 | TAIE | ID__8;
+    TA0EX0 = TAIDEX_4; //DIVISOR ADICIONAL
+    TA0CCR0 = 16384; //la cuarta parte del overflow
+    TA0CCTL0 |= CCIE;
 }
 
 void initLCD(void) { 
@@ -340,10 +405,6 @@ void initLCD(void) {
     LCDCPCTL0 = 0xFFFF;
     LCDCPCTL1 = 0xFC3F;
     LCDCPCTL2 = 0x0FFF;
-
-    // Habilitar segmentos del dígito asociado a LCDM10
-    LCDCPCTL0 |= (BIT0 | BIT1 | BIT2 | BIT3);      // S0–S3
-    LCDCPCTL2 |= (BIT12 | BIT13 | BIT14 | BIT15);  // S28–S31
 
     // Configurar LCD: ACLK, divisor 1, predivisor 16, modo 4-MUX
     LCDCCTL0 = LCDDIV__1 | LCDPRE__16 | LCD4MUX | LCDLP;
