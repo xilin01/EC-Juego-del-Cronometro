@@ -1,2 +1,21 @@
+# Salidas de compilación de Code Composer Studio
+Debug/
+Release/
+*.obj
+*.out
+*.map
+*.d
+*_linkInfo.xml
+
+# Cachés del IDE / clangd
+.clangd/
 .theia/
+.launches/
+
+# Borradores locales
 BORRADOR/
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini

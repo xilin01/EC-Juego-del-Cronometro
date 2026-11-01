@@ -1,6 +1,7 @@
 #include <msp430.h>
 
 typedef enum {NORMAL, PENALTI, FALTA} tEstado;
+typedef enum {A_NORMAL, A_GOL, A_PENALTI, A_FALTA, A_J1J2, A_J2J1} tAnimacion;
 
 const char MENSAJEINICIO[] = "COMIENZA EL PARTIDO: PULSAD LA TECLA P/ I PARA ALTERNAR ENTRE CENTESIMAS PARES/ IMPARES AL TIRAR UN PENALTI O CUALQUIER OTRA TECLA PARA VER EL MARCADOR\n";
 const char MENSAJEGOL[] = "GOL DEL JUGADOR ";
@@ -12,13 +13,16 @@ const char MENSAJEEMPATE[] = "\nFIN DEL PARTIDO: EMPATE";
 const unsigned char LCDNUM[10] = {0xFC, 0x60, 0xDB, 0xF3, 0x67, 0xB7, 0xBF, 0xE0, 0xFF, 0xE7};
 const unsigned int MAXTIME = 9000; // En centisegundos
 const int MAXGOLES = 5;
+const int ANIMACIONES = 6;
 
 char mensajeAMandar[200];
 volatile unsigned int contMensaje = 0;
 volatile unsigned int centiseg = 0;
 volatile int goles1 = 0, goles2 = 0;
 volatile tEstado estadoActual = NORMAL;
+volatile tAnimacion animacionActual = A_NORMAL;
 volatile int par = 0;
+int tiempoAnimacion = 6;
 
 void initPins(void);
 void initClock(void);
@@ -40,6 +44,13 @@ void mostrarMarcador(void);
 void enviarMensaje(const char* mensaje, int jugador);
 char nombreJugador(int jugador);
 void enviarCaracter(void);
+void setAnimacion(tAnimacion animacion);
+void interrupcionAnimacion(void);
+void avanzarAnimacion(void);
+void animacionOpuesta(void);
+void desplazarDer(void);
+void desplazarIzq(void);
+void movimientoIzqDer(int momento);
 
 int main(void) {
     WDTCTL = WDTPW | WDTHOLD; 
@@ -52,6 +63,7 @@ int main(void) {
     initUART();
     display();
     enviarMensaje(MENSAJEINICIO, 0);
+    setAnimacion(A_NORMAL);
     _BIS_SR(LPM0_bits + GIE);
 }
 
@@ -62,8 +74,18 @@ __interrupt void BUTTONS(void) {
         case 0: break; // Sin interrupciones
         case 4: accionJugador(BIT1, BIT2); break; // P1.1
         case 6: accionJugador(BIT2, BIT1); break; // P1.2
-        default:
+        default: break;
     }
+}
+
+#pragma vector = TIMER0_A0_VECTOR
+__interrupt void ANIMATION_FAST(void) {
+    interrupcionAnimacion();
+}
+
+#pragma vector = TIMER0_A1_VECTOR
+__interrupt void ANIMATION_SLOW(void) {
+    if(TA0IV == 14) interrupcionAnimacion(); // Overflow
 }
 
 #pragma vector = TIMER1_A0_VECTOR
@@ -78,7 +100,7 @@ __interrupt void USCI_A1_ISR(void) {
         case 0: break; // Sin interrupciones
         case 2: recibirCaracter(); break; // Letra recibida
         case 4: enviarCaracter(); break; // Buffer de transmisión vacío
-        default:
+        default: break;
     }
 }
 
@@ -90,9 +112,7 @@ void accionJugador(int jugador, int rival) {
         if(partidoTerminado()) terminarPartido();
         else {
             switch(estadoActual) {
-                case NORMAL:
-                    jugada(jugador, rival);
-                    break;
+                case NORMAL: jugada(jugador, rival); break;
                 case PENALTI:
                     if(par == 0) {
                          if(centiseg % 2 == 0) gol(jugador);
@@ -136,7 +156,7 @@ void jugada(int jugador, int rival) {
             falta(rival);
             pasarTurno(jugador, rival);
             break;
-        default:
+        default: break;
     }
 }
 
@@ -144,22 +164,25 @@ void gol(int jugador) {
     if(jugador == BIT1) goles1++;
     else goles2++;
     enviarMensaje(MENSAJEGOL, jugador);
+    setAnimacion(A_GOL);
 }
 
 void penalti(int jugador) {
     estadoActual = PENALTI;
     enviarMensaje(MENSAJEPENALTI, jugador);
+    setAnimacion(A_PENALTI);
 }
 
 void falta(int jugador){
     estadoActual = FALTA;
     enviarMensaje(MENSAJEFALTA, jugador);
+    setAnimacion(A_FALTA);
 }
 
 void pasarTurno(int jugador, int rival){
     P1IE &= ~jugador;
     P1IE |= rival;
-
+    setAnimacion(jugador == BIT1 ? A_J1J2 : A_J2J1);
     // Apagamos el LED del jugador y encendemos el del rival
     if(jugador == BIT1){ 
         P1OUT &= ~BIT0;
@@ -171,9 +194,8 @@ void pasarTurno(int jugador, int rival){
     }
 }
 
-// LCD
+// LCD y animaciones
 void display(void){ 
-    LCDCMEMCTL |= LCDCLRM;
     LCDM7 |= 0x04; // Activa los dos puntos del bloque A2
     LCDM20 |= 0x04; // Activa los dos puntos del bloque A4
 
@@ -187,6 +209,67 @@ void display(void){
 
     int minutos = centiseg / 100 / 60 % 60;
     LCDM6 = LCDNUM[minutos % 10]; // Solo llega hasta 1
+}
+
+void setAnimacion(tAnimacion animacion){
+    if(animacionActual == A_NORMAL || animacion == A_NORMAL) {
+        LCDM14 = LCDM18 = 0;
+        tiempoAnimacion = ANIMACIONES;
+        animacionActual = animacion;
+        switch(animacion) { 
+            case A_NORMAL:
+            case A_GOL: LCDM18 = LCDM14 = (BIT5 | BIT6 | BIT7); break;  
+            case A_PENALTI: LCDM14 = (BIT5 | BIT6 | BIT7); break;
+            case A_FALTA: LCDM18 = LCDM14 = (BIT5 | BIT7);  break;
+            case A_J1J2: LCDM18 = BIT5; break;
+            case A_J2J1: LCDM14 = BIT7; break;
+        }
+    }
+}
+
+void interrupcionAnimacion(void) {
+    tiempoAnimacion--;
+    if(tiempoAnimacion > 0) avanzarAnimacion();
+    else {
+        tiempoAnimacion = ANIMACIONES;
+        setAnimacion(A_NORMAL);
+    }
+}
+
+void avanzarAnimacion(void) {
+    switch(animacionActual) { 
+        case A_NORMAL: break; // No hacemos cambios
+        case A_GOL: 
+        case A_PENALTI:  
+        case A_FALTA: animacionOpuesta(); break;
+        case A_J1J2: desplazarDer(); break;
+        case A_J2J1: desplazarIzq(); break;
+    }
+}
+
+void animacionOpuesta(void) {
+    LCDM14 ^= (BIT5 | BIT6 | BIT7);
+    LCDM18 ^= (BIT5 | BIT6 | BIT7);
+}
+
+void desplazarDer(void) {
+    movimientoIzqDer(tiempoAnimacion);
+}
+
+void desplazarIzq(void) {
+    movimientoIzqDer(ANIMACIONES - tiempoAnimacion + 1);
+}
+
+void movimientoIzqDer(int momento) {
+    LCDM14 = LCDM18 = 0;
+    switch(momento) {
+        case 6: LCDM18 = BIT5; break;
+        case 5: LCDM14 = BIT5; break;
+        case 4: LCDM18 = BIT6; break;
+        case 3: LCDM14 = BIT6; break;
+        case 2: LCDM18 = BIT7; break;
+        case 1: LCDM14 = BIT7; break;
+    }
 }
 
 // UART
@@ -206,8 +289,8 @@ void mostrarEleccion(void) {
     char* eleccion;
     int i = 0, j = 0;
 
-    if(par == 0) eleccion = "PARES\n"; 
-    else eleccion = "IMPARES\n"; 
+    if(par == 0) eleccion = "PARES\n";
+    else eleccion = "IMPARES\n";
     while(plantilla[i] != '\0') {
         mensajeAMandar[i] = plantilla[i];
         i++;
@@ -294,10 +377,15 @@ void initClock(void) {
     CSCTL0_H = 0; // Lock CS registers
 }
 
-void initTimer(void) { 
+void initTimer(void) {
     TA1CTL = TASSEL__ACLK | TACLR | MC_1;
     TA1CCR0 = 327;
     TA1CCTL0 &= ~CCIE;
+
+    TA0CTL = TASSEL__SMCLK | TACLR | MC_2 | TAIE | ID__8;
+    TA0EX0 = TAIDEX_4; // Divisor adicional
+    TA0CCR0 = 16384; // La cuarta parte del overflow
+    TA0CCTL0 |= CCIE;
 }
 
 void initLCD(void) { 
