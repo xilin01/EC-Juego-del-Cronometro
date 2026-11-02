@@ -79,6 +79,21 @@ main()  →  init pines / reloj / timers / LCD / UART  →  LPM0 + GIE (duerme)
 
 ---
 
+## Descargar
+
+¿No quieres compilar? Descarga el firmware ya compilado desde la [última release](https://github.com/xilin01/EC-Juego-del-Cronometro/releases/latest):
+
+| Archivo | Para qué |
+| --- | --- |
+| `juego-cronometro.txt` | Firmware en formato TI-TXT. Se flashea con [UniFlash](https://www.ti.com/tool/UNIFLASH) |
+| `juego-cronometro.out` | Ejecutable ELF para Code Composer Studio o UniFlash (sirve también para depurar) |
+
+1. Conecta la LaunchPad por USB y abre UniFlash. Detecta sola la **MSP430FR6989**.
+2. Carga `juego-cronometro.txt` y pulsa **Load Image**.
+3. Abre una terminal serie en el puerto *"MSP Application UART1"* a **9600 baudios, 8N1**.
+
+---
+
 ## Compilar y ejecutar
 
 1. Instala [Code Composer Studio](https://www.ti.com/tool/CCSTUDIO) (versión basada en Theia).
